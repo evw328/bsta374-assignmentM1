@@ -1,0 +1,124 @@
+---
+title: "Fatal Crashes in New England, 2021"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: cosmo
+    source_code: embed
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(sf)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(plotly)
+library(leaflet)
+library(DT)
+library(tigris)
+options(tigris_use_cache = TRUE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# New England state FIPS codes
+ne_fips <- c(CT = 9, ME = 23, MA = 25, NH = 33, RI = 44, VT = 50)
+
+raw <- read_csv("data/accident.csv") |>
+  filter(STATE %in% ne_fips)
+
+# FARS codes "not reported" coordinates as 77.7777 / 777.7777, not NA.
+# New England latitudes are < 48 and longitudes are negative.
+pts <- raw |>
+  filter(!is.na(LATITUDE), LATITUDE < 70, LONGITUD < 0) |>
+  mutate(month = as.Date(sprintf("%04d-%02d-01", YEAR, MONTH))) |>
+  st_as_sf(coords = c("LONGITUD", "LATITUDE"), crs = 4326, remove = FALSE)
+
+n_dropped <- nrow(raw) - nrow(pts)
+
+# boundaries: outline of the study area
+area <- counties(cb = TRUE, year = 2020, progress_bar = FALSE) |>
+  filter(STATEFP %in% sprintf("%02d", ne_fips)) |>
+  st_transform(4326)
+
+# state outlines (counties dissolved) and the whole study region
+ne_states <- area |> group_by(STATEFP) |> summarise(.groups = "drop")
+ne_region <- st_make_valid(st_union(area))
+
+# grey mask: a big box with New England cut out
+box <- st_as_sfc(st_bbox(c(xmin = -100, ymin = 30, xmax = -45, ymax = 55),
+                         crs = st_crs(4326)))
+mask <- st_sf(geometry = st_difference(box, ne_region))
+```
+
+```{css, echo=FALSE}
+#about .chart-stage { overflow-y: auto; font-size: 13px; }
+```
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Fatal crashes in New England, 2021 (one circle per crash) {data-height=650}
+
+```{r map}
+pts_map <- pts |>
+  mutate(
+    county = tools::toTitleCase(tolower(sub(" \\(\\d+\\)$", "", COUNTYNAME))),
+    deaths = factor(ifelse(FATALS == 1, "1 death", "2 or more deaths"),
+                    levels = c("1 death", "2 or more deaths"))
+  )
+
+pal <- colorFactor(c("#EF8A62", "#67001F"), domain = pts_map$deaths)
+
+leaflet(pts_map) |>
+  addProviderTiles("Esri.WorldStreetMap") |>
+  fitBounds(-73.8, 40.9, -66.8, 47.6) |>
+  addPolygons(data = mask, stroke = FALSE, fillColor = "grey30",
+              fillOpacity = 0.55, options = pathOptions(interactive = FALSE)) |>
+  addPolygons(data = area, fill = FALSE, color = "grey55", weight = 1) |>
+  addPolygons(data = ne_states, fill = FALSE, color = "grey20", weight = 2.5) |>
+  addCircleMarkers(
+    radius = 4, stroke = FALSE, fillOpacity = 0.7,
+    color = ~pal(deaths),
+    label = ~sprintf("%s %d, 2021: %d killed (%s County)",
+                     MONTHNAME, DAY, FATALS, county)
+  ) |>
+  addLegend("bottomright", pal = pal, values = ~deaths,
+            title = "Deaths per crash", opacity = 0.9)
+```
+
+> Each circle is a fatal crash, the lighter color represents 1 death at that crash, while the darker color represents 2 or more deaths at that crash.  There is not population behind the points, so density mostly reflects where people live and drive the most and not higher risk.  The unshaded area is the study area of New England and the data is from 2021.
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Fatal crashes per month, New England, 2021 {data-height=450}
+
+```{r timeseries}
+by_month <- pts |>
+  st_drop_geometry() |>
+  count(month)                                  # crashes per month
+
+p <- ggplot(by_month, aes(month, n)) +
+  geom_col(fill = "#B2182B") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  labs(x = NULL, y = "Fatal crashes per month") +
+  theme_minimal()
+
+ggplotly(p)                                     # hover, zoom
+```
+
+> The series shows that fatal crashes are the lowest in February and highest in August.  They are lowest in January, February, and March.  With no population or travel amounts, this could reflect more driving overall rather than higher risks per trip.
+
+
+### About the data {#about data-height=350}
+
+- **Outcome:** Fatal motor vehicle crashes (in which at least one person died within 30 days), 2021, with one point per crash.
+- **Population at risk:** There is no population at risk, so the maps show counts, not risk.
+- **Expected counts:** There are none computed.
+- **Geography:** Six New England states (CT, ME, MA, NH, RI, VT), with 67 counties total.  Points are crash locations of coordinates recorded in FARS.
+- **Locations dropped:** 2 of 1,052 crashes were left out of the map because FARS gave no valid coordinates (coded "not reported").
+- **Method:** Counts only: crashes per month (bars) and one circle per crash (map), colored by deaths per crash. No expected counts or rates.
+- **Source:** NHTSA, Fatality Analysis Reporting System (FARS), 2021 final file, National CSV (https://static.nhtsa.gov/nhtsa/downloads/FARS/2021/National/FARS2021NationalCSV.zip). County boundaries: US Census Bureau, 2020, via `tigris`.
+- **Areas without data:** 3 of the 67 counties have no fatal crash in the file: Nantucket (MA), Bristol (RI) and Grand Isle (VT), meaning that no fatal crashes happened during that time, not that there is data missing.
+- **Limitation:** This covers one year only and is counts with no population or miles driven, so busier places and  will show more crashes without being riskier. Non-fatal crashes are not in FARS.
